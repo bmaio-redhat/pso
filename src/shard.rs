@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
 use tokio::process::Command;
 use tokio::task::JoinSet;
 
@@ -72,11 +75,21 @@ fn playwright_bin(project_dir: &Path) -> String {
     "npx".into()
 }
 
+/// Send SIGTERM to every tracked process group, killing all child trees.
+pub fn kill_all_shards(pids: &Arc<Mutex<Vec<u32>>>) {
+    let pids = pids.lock().unwrap();
+    for &pid in pids.iter() {
+        // Negative PID = kill the entire process group
+        let _ = signal::kill(Pid::from_raw(-(pid as i32)), Signal::SIGTERM);
+    }
+}
+
 /// Spawn a single shard process and capture its output.
 async fn run_shard(
     shard_index: u32,
     cli: &Cli,
     env: &HashMap<String, String>,
+    pids: &Arc<Mutex<Vec<u32>>>,
 ) -> ShardResult {
     let start = Instant::now();
     let bin = playwright_bin(&cli.project_dir);
@@ -106,25 +119,42 @@ async fn run_shard(
     cmd.env("SHARD_INDEX", shard_index.to_string());
     cmd.env("SHARD_TOTAL", cli.shards.to_string());
 
-    let output = cmd.output().await;
-    let elapsed = start.elapsed();
+    cmd.process_group(0);
 
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let code = out.status.code().unwrap_or(-1);
+    let child = cmd.spawn();
+    match child {
+        Ok(child) => {
+            if let Some(pid) = child.id() {
+                pids.lock().unwrap().push(pid);
+            }
+            match child.wait_with_output().await {
+                Ok(out) => {
+                    let elapsed = start.elapsed();
+                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    let code = out.status.code().unwrap_or(-1);
 
-            ShardResult {
-                shard_index,
-                outcome: if out.status.success() {
-                    ShardOutcome::Passed
-                } else {
-                    ShardOutcome::Failed { exit_code: code }
+                    ShardResult {
+                        shard_index,
+                        outcome: if out.status.success() {
+                            ShardOutcome::Passed
+                        } else {
+                            ShardOutcome::Failed { exit_code: code }
+                        },
+                        duration: elapsed,
+                        stdout,
+                        stderr,
+                    }
+                }
+                Err(e) => ShardResult {
+                    shard_index,
+                    outcome: ShardOutcome::Error {
+                        message: e.to_string(),
+                    },
+                    duration: start.elapsed(),
+                    stdout: String::new(),
+                    stderr: e.to_string(),
                 },
-                duration: elapsed,
-                stdout,
-                stderr,
             }
         }
         Err(e) => ShardResult {
@@ -132,7 +162,7 @@ async fn run_shard(
             outcome: ShardOutcome::Error {
                 message: e.to_string(),
             },
-            duration: elapsed,
+            duration: start.elapsed(),
             stdout: String::new(),
             stderr: e.to_string(),
         },
@@ -140,7 +170,7 @@ async fn run_shard(
 }
 
 /// Orchestrate all shards in parallel and return a summary.
-pub async fn orchestrate(cli: &Cli) -> RunSummary {
+pub async fn orchestrate(cli: &Cli, pids: Arc<Mutex<Vec<u32>>>) -> RunSummary {
     let total_start = Instant::now();
     let env = build_env(cli);
 
@@ -156,7 +186,7 @@ pub async fn orchestrate(cli: &Cli) -> RunSummary {
         let cli_workers = cli.workers;
         let cli_memory_mb = cli.memory_mb;
         let cli_headed = cli.headed;
-        let cli_quiet = cli.quiet;
+        let cli_verbose = cli.verbose;
         let cli_project_dir = cli.project_dir.clone();
         let cli_config = cli.config.clone();
         let cli_grep = cli.grep.clone();
@@ -166,6 +196,7 @@ pub async fn orchestrate(cli: &Cli) -> RunSummary {
         let cli_timeout = cli.timeout;
         let cli_env_pairs = cli.env.clone();
         let env = env.clone();
+        let pids = Arc::clone(&pids);
 
         join_set.spawn(async move {
             let owned_cli = Cli {
@@ -173,7 +204,7 @@ pub async fn orchestrate(cli: &Cli) -> RunSummary {
                 workers: cli_workers,
                 memory_mb: cli_memory_mb,
                 headed: cli_headed,
-                quiet: cli_quiet,
+                verbose: cli_verbose,
                 project_dir: cli_project_dir,
                 config: cli_config,
                 grep: cli_grep,
@@ -183,7 +214,7 @@ pub async fn orchestrate(cli: &Cli) -> RunSummary {
                 timeout: cli_timeout,
                 env: cli_env_pairs,
             };
-            run_shard(i, &owned_cli, &env).await
+            run_shard(i, &owned_cli, &env, &pids).await
         });
     }
 
@@ -191,7 +222,7 @@ pub async fn orchestrate(cli: &Cli) -> RunSummary {
     while let Some(res) = join_set.join_next().await {
         match res {
             Ok(shard_result) => {
-                if !cli.quiet {
+                if cli.verbose {
                     print_shard_output(&shard_result);
                 }
                 results.push(shard_result);

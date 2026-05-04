@@ -52,7 +52,6 @@ fn env_flag_parsed_correctly() {
             "-e", "FOO=bar",
             "-e", "BAZ=qux",
             "--project-dir", "/nonexistent",
-            "--quiet",
         ])
         .output()
         .unwrap();
