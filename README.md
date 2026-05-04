@@ -67,7 +67,7 @@ pso --shards <N> [OPTIONS]
 | `--headed` | `false` | Run browsers in headed mode |
 | `-e, --env <KEY=VALUE>` | — | Extra env vars passed to each shard (repeatable) |
 | `--timeout <MS>` | — | Timeout per test in milliseconds |
-| `--quiet` | `false` | Suppress per-shard output, only show the final summary |
+| `-v, --verbose` | `false` | Show full per-shard stdout/stderr (default: only start and summary) |
 
 ### Examples
 
@@ -83,8 +83,8 @@ pso -s 2 -w 3 -p /path/to/project \
   -e "BRIDGE_BASE_ADDRESS=https://console.example.com" \
   -e "BRIDGE_KUBEADMIN_PASSWORD=secret"
 
-# Single shard with higher memory, quiet output
-pso --shards 1 --workers 4 --memory-mb 8192 --quiet
+# Single shard with higher memory, verbose to see full output
+pso --shards 1 --workers 4 --memory-mb 8192 --verbose
 
 # Specific test file across 2 shards
 pso --shards 2 -f "checkups.spec.ts"

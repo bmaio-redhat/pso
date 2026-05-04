@@ -60,9 +60,9 @@ pub struct Cli {
     #[arg(long)]
     pub timeout: Option<u64>,
 
-    /// Suppress per-shard stdout, only show the summary
-    #[arg(long, default_value_t = false)]
-    pub quiet: bool,
+    /// Show full per-shard stdout/stderr (default: only start and summary)
+    #[arg(short, long, default_value_t = false)]
+    pub verbose: bool,
 }
 
 impl Cli {
@@ -81,7 +81,7 @@ impl Cli {
             headed: false,
             env: vec![],
             timeout: None,
-            quiet: false,
+            verbose: false,
         }
     }
 }
